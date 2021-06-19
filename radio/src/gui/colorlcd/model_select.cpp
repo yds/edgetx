@@ -356,7 +356,15 @@ ModelSelectMenu::ModelSelectMenu():
   modelslist.load();
 
   TRACE("TabsGroup: %p", this);
+  int page = 0, i = 0;
   for (auto category: modelslist.getCategories()) {
     addTab(new ModelCategoryPage(category));
+    if (category == modelslist.getCurrentCategory())
+      page = i;
+
+    ++i;
   }
+
+  TRACE("page=%d", page);
+  setCurrentTab(page);
 }
