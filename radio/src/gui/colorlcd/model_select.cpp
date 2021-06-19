@@ -222,7 +222,13 @@ class ModelCategoryPageBody : public FormWindow
               storageCheck(true);
 
               modelslist.setCurrentModel(model);
-              update();  // modelslist.getModelIndex(modelCell));
+
+              int modelIdx = category->getModelIndex(model);
+              TRACE("modelIdx=%d", modelIdx);
+              if (modelIdx >= 0)
+                update(modelIdx);
+              else
+                update();
             });
           }
           menu->addLine(STR_CREATE_MODEL, getCreateModelAction());

@@ -80,6 +80,8 @@ public:
   void removeModel(ModelCell * model);
   void moveModel(ModelCell * model, int8_t step);
 
+  int getModelIndex(const ModelCell* model);
+
   void save(FIL * file);
 };
 
