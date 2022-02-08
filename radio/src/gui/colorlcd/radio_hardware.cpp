@@ -372,6 +372,30 @@ void RadioHardwarePage::build(FormWindow * window)
   }
 #endif
 
+#if defined(INTERNAL_MODULE_PXX1) && defined(EXTERNAL_ANTENNA)
+new StaticText(window, grid.getLabelSlot(), STR_ANTENNA, 0, COLOR_THEME_PRIMARY1);
+new Choice(
+    window, grid.getFieldSlot(1, 0), STR_ANTENNA_MODES, ANTENNA_MODE_INTERNAL,
+    ANTENNA_MODE_EXTERNAL, GET_DEFAULT(g_eeGeneral.antennaMode),
+    [](int antenna) {
+      if (!isExternalAntennaEnabled() &&
+          (antenna == ANTENNA_MODE_EXTERNAL ||
+           (antenna == ANTENNA_MODE_PER_MODEL &&
+            g_model.moduleData[INTERNAL_MODULE].pxx.antennaMode ==
+                ANTENNA_MODE_EXTERNAL))) {
+        if (confirmationDialog(STR_ANTENNACONFIRM1, STR_ANTENNACONFIRM2)) {
+          g_eeGeneral.antennaMode = antenna;
+          SET_DIRTY();
+        }
+      } else {
+        g_eeGeneral.antennaMode = antenna;
+        checkExternalAntenna();
+        SET_DIRTY();
+      }
+    });
+grid.nextLine();
+#endif
+
 #if defined(AUX_SERIAL)
   new StaticText(window, grid.getLabelSlot(), STR_AUX_SERIAL_MODE, 0, COLOR_THEME_PRIMARY1);
   auto aux =
