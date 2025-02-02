@@ -64,7 +64,7 @@
 #elif defined(RADIOMASTER_RELEASE)
   const char vers_stamp[]   = "FW" TAB ": edgetx-" FLAVOUR    "\036VERS" TAB ": RM Factory (" GIT_STR ")" "\036BUILT BY : EdgeTX" "\036DATE" TAB ": " DATE " " TIME;
 #elif defined(JUMPER_RELEASE) || defined(IFLIGHT_RELEASE)
-  const char vers_stamp[]   = "FW" TAB ": edgetx-" FLAVOUR    "\036VERS" TAB ": Factory (" GIT_STR ")" "\036BUILT BY : EdgeTX" "\036DATE" TAB ": " DATE " " TIME;
+  const char vers_stamp[]   = "FW" TAB ": edgetx-" FLAVOUR "\036VERS" TAB ": Factory (" GIT_STR ")" "\036BUILT BY : EdgeTX" "\036DATE" TAB ": " DATE " " TIME;
 #else
   #if defined(VERSION_TAG)
     const char vers_stamp[]   = "FW" TAB ": edgetx-" FLAVOUR    "\036VERS" TAB ": " VERSION_TAG DISPLAY_VERSION "\036NAME" ": " CODENAME "\036DATE" TAB ": " DATE " " TIME;
@@ -96,28 +96,22 @@ __SECTION_USED(".bootversiondata") const char boot_version[] =     "edgetx-" FLA
  * Tries to find EdgeTX or OpenTX version in the first 1024 byte of either firmware/bootloader (the one not running) or the buffer
  * @param buffer If non-null find the firmware version in the buffer instead
  */
-const char * getFirmwareVersion(const char * buffer)
+const char * getFirmwareVersion(const uint8_t* buffer)
 {
-  if (buffer == nullptr) {
-#if defined(BOOT)
-    buffer = (const char *)(FIRMWARE_ADDRESS + BOOTLOADER_SIZE);
+  if(buffer == nullptr) {
+#if defined(BOOT) && !defined(FIRMWARE_QSPI)
+    buffer = (const uint8_t *)(FIRMWARE_ADDRESS + BOOTLOADER_SIZE);
 #else
-    buffer = (const char *)FIRMWARE_ADDRESS;
+    buffer = (const uint8_t *)FIRMWARE_ADDRESS;
 #endif
   }
 
-  for (int i = 0; i < 1024; i++) {
+  for (int i = 0; i < 2024; i++) {
     if ((memcmp(buffer + i, "edgetx-", 7) == 0)
         || memcmp(buffer + i, "opentx-", 7) == 0) {
-      return buffer + i;
+      return (const char*)buffer + i;
     }
   }
-
   return "no version found";
-}
-#else
-const char * getFirmwareVersion(const char * buffer)
-{
-  return "edgetx-" FLAVOUR "-" VERSION DISPLAY_VERSION " (" GIT_STR ")";
 }
 #endif

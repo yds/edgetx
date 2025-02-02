@@ -1,7 +1,8 @@
 /*
- * Copyright (C) OpenTX
+ * Copyright (C) EdgeTX
  *
  * Based on code named
+ *   opentx - https://github.com/opentx/opentx
  *   th9x - http://code.google.com/p/th9x
  *   er9x - http://code.google.com/p/er9x
  *   gruvin9x - http://code.google.com/p/gruvin9x
@@ -21,8 +22,10 @@
 #include "radiodata.h"
 #include "radiodataconversionstate.h"
 #include "eeprominterface.h"
+#include "compounditemmodels.h"
 
-RadioData::RadioData()
+RadioData::RadioData() :
+  sortOrder(0)
 {
   models.resize(getCurrentFirmware()->getCapability(Models));
 }
@@ -106,33 +109,48 @@ void RadioData::convert(RadioDataConversionState & cstate)
 
 void RadioData::addLabel(QString label)
 {
-  label.replace("/c",",");
-  label.replace("//","/");
-  if(labels.indexOf(label) == -1)
-    labels.append(label);
+  label = unEscapeCSV(label);
+  // Truncate possible UTF-8 to 16 char maximum
+  QByteArray output = label.toLatin1();
+  if (output.size() > LABEL_LENGTH) {
+      int truncateAt = 0;
+      for (int i = LABEL_LENGTH; i > 0; i--) {
+          if ((output[i] & 0xC0) != 0x80) {
+              truncateAt = i;
+              break;
+          }
+      }
+      output.truncate(truncateAt);
+  }
+  label = QString(output);
+
+  if (indexOfLabel(label) < 0) {
+    LabelData ld = { label, false };
+    labels.append(ld);
+  }
 }
 
 bool RadioData::deleteLabel(QString label)
 {
   bool deleted = false;
-  QString csvLabel = label;
-  csvLabel.replace("/","//");
-  csvLabel.replace(",","/c");
 
   // Remove labels in the models
   for(auto& model : models) {
-    QStringList modelLabels = QString(model.labels).split(',',QString::SkipEmptyParts);
-    if(modelLabels.indexOf(csvLabel) >= 0)
+    QStringList modelLabels = fromCSV(QString::fromLatin1(model.labels));
+    if (modelLabels.indexOf(label) >= 0) {
       deleted = true;
-    modelLabels.removeAll(csvLabel);
-    strcpy(model.labels, QString(modelLabels.join(',')).toLocal8Bit().data());
+      modelLabels.removeAll(label);
+    }
+    strcpy(model.labels, toCSV(modelLabels).toLatin1().data());
   }
 
   // Remove the label from the global list
-  labels.removeAll(label);
+  int index = indexOfLabel(label);
+  if (index > -1)
+    labels.remove(index);
 
   // If no labels remain, add a Favorites one
-  if(!labels.size()) {
+  if (!labels.size()) {
     addLabel(tr("Favorites"));
   }
   return deleted;
@@ -140,43 +158,47 @@ bool RadioData::deleteLabel(QString label)
 
 bool RadioData::deleteLabel(int index)
 {
-  if(index >= labels.size()) return false;
-  QString modelLabel = labels.at(index);
+  if (index >= labels.size()) return false;
+  QString modelLabel = labels.at(index).name;
   return deleteLabel(modelLabel);
 }
 
 bool RadioData::renameLabel(QString from, QString to)
 {
   bool success = true;
-  int lengthdiff = to.size() - from.size();
-  QString csvFrom = from;
-  QString csvTo = to;
-  csvFrom.replace("/","//");
-  csvFrom.replace(",","/c");
-  csvTo.replace("/","//");
-  csvTo.replace(",","/c");
+  QString csvFrom = escapeCSV(from);
+  QString csvTo = escapeCSV(to);
+  int lengthdiff = csvTo.size() - csvFrom.size();
 
-
-  // Check that rename is possible, not too long
+  // Check that rename is possible (Rename won't cause too long of a string)
   for(auto& model : models) {
-    if((int)strlen(model.labels) + lengthdiff > (int)sizeof(model.labels) - 1) {
-      success = false;
-    }
-  }
-  if(success) {
-    for(auto& model : models) {
-      QStringList modelLabels = QString(model.labels).split(',',QString::SkipEmptyParts);
-      int ind = modelLabels.indexOf(csvFrom);
-      if(ind != -1) {
-        modelLabels.replace(ind, csvTo);
-        QString outputcsv = QString(modelLabels.join(','));
-        if(outputcsv.toLocal8Bit().size() < (int)sizeof(model.labels));
-          strcpy(model.labels, outputcsv.toLocal8Bit().data());
+    if (RadioData::fromCSV(model.labels).indexOf(from) != -1) {
+      if ((int)strlen(model.labels) + lengthdiff > (int)sizeof(model.labels) - 1) {
+        success = false;
+        throw std::length_error(model.name);
+        break;
       }
     }
-    int ind = labels.indexOf(from);
-    if(ind != -1) {
-      labels.replace(ind, to);
+  }
+  if (success) {
+    for(auto& model : models) {
+      QStringList modelLabels = QString(model.labels).split(',', Qt::SkipEmptyParts);
+      int ind = modelLabels.indexOf(csvFrom);
+      if (ind != -1) {
+        modelLabels.replace(ind, csvTo);
+        QString outputcsv = QString(modelLabels.join(','));
+        if (outputcsv.toLatin1().size() < (int)sizeof(model.labels)) {
+          strcpy(model.labels, outputcsv.toLatin1().data());
+        } else { // Shouldn't ever get here, from check above
+          success = false;
+          throw std::length_error(model.name);
+          break;
+        }
+      }
+    }
+    int ind = indexOfLabel(from);
+    if (ind != -1) {
+      labels[ind].name = to;
     }
   }
   return success;
@@ -184,42 +206,51 @@ bool RadioData::renameLabel(QString from, QString to)
 
 bool RadioData::renameLabel(int index, QString to)
 {
-  if(index >= labels.size()) return false;
-  QString from = labels.at(index);
+  if (index >= labels.size()) return false;
+  QString from = labels.at(index).name;
   return renameLabel(from, to);
+}
+
+void RadioData::swapLabel(int indFrom, int indTo)
+{
+  if(abs(indFrom - indTo) > 1 ||
+      indFrom >= labels.size() ||
+      indTo >= labels.size() ||
+      indFrom < 0 ||
+      indTo < 0)
+    return;
+  LabelData tmplbl = labels.at(indFrom);
+  labels.replace(indFrom, labels.at(indTo));
+  labels.replace(indTo, tmplbl);
 }
 
 bool RadioData::addLabelToModel(int index, QString label)
 {
-  if(index >= models.size()) return false;
-
-  label.replace("/","//");
-  label.replace(",","/c");
+  if ((unsigned int)index >= models.size()) return false;
+  label = escapeCSV(label);
 
   char *modelLabelCsv = models[index].labels;
   // Make sure it will fit
-  if(strlen(modelLabelCsv) + label.size() + 1 < sizeof(models[index].labels)-1) {
-    QStringList modelLabels = QString(modelLabelCsv).split(',',QString::SkipEmptyParts);
-    if(modelLabels.indexOf(label) == -1) {
+  if (strlen(modelLabelCsv) + label.size() + 1 < sizeof(models[index].labels)-1) {
+    QStringList modelLabels = QString::fromLatin1(modelLabelCsv).split(',', Qt::SkipEmptyParts);
+    if (modelLabels.indexOf(label) == -1) {
       modelLabels.append(label);
-      strcpy(models[index].labels, QString(modelLabels.join(',')).toLocal8Bit().data());
+      strcpy(models[index].labels, QString(modelLabels.join(',')).toLatin1().data());
       return true;
     }
   }
+  throw std::length_error(models[index].name);
   return false;
 }
 
 bool RadioData::removeLabelFromModel(int index, QString label)
 {
-  if(index >= models.size()) return false;
-  label.replace("/","//");
-  label.replace(",","/c");
+  if ((unsigned int)index >= models.size()) return false;
 
-  char *modelLabelCsv = models[index].labels;
-  QStringList modelLabels = QString(modelLabelCsv).split(',',QString::SkipEmptyParts);
-  if(modelLabels.indexOf(label) >= 0) {
-    modelLabels.removeAll(label);
-    strcpy(models[index].labels, QString(modelLabels.join(',')).toLocal8Bit().data());
+  QStringList lbls = fromCSV(QString::fromLatin1(models[index].labels));
+  if (lbls.indexOf(label) >= 0) {
+    lbls.removeAll(label);
+    strcpy(models[index].labels, toCSV(lbls).toLatin1().data());
     return true;
   }
   return false;
@@ -228,9 +259,87 @@ bool RadioData::removeLabelFromModel(int index, QString label)
 void RadioData::addLabelsFromModels()
 {
   for(const auto &model: models) {
-    QStringList labels = QString(model.labels).split(',',QString::SkipEmptyParts);
+    QStringList labels = QString(model.labels).split(',', Qt::SkipEmptyParts);
     foreach(QString label, labels) {
       addLabel(label);
     }
   }
+}
+
+int RadioData::indexOfLabel(QString & label) const
+{
+  int index = -1;
+
+  for (int i = 0; i < labels.size(); i++) {
+    if (labels.at(i).name == label) {
+      index = i;
+      break;
+    }
+  }
+
+  return index;
+}
+
+QStringList RadioData::fromCSV(const QString &csv)
+{
+  QStringList lbls = QString(csv).split(',', Qt::SkipEmptyParts);
+  for(QString &label: lbls) {
+    label = unEscapeCSV(label);
+  }
+  return lbls;
+}
+
+QString RadioData::toCSV(QStringList lbls)
+{
+  for(QString &label: lbls) {
+    label = escapeCSV(label);
+  }
+  return lbls.join(',');
+}
+
+QString RadioData::escapeCSV(QString str)
+{
+  str.replace("/","//");
+  str.replace(",","/c");
+  return str;
+}
+
+QString RadioData::unEscapeCSV(QString str)
+{
+  str.replace("/c",",");
+  str.replace("//","/");
+  return str;
+}
+
+//  static
+QString RadioData::modelSortOrderToString(int value)
+{
+  switch(value) {
+    case MSO_NO_SORT:
+      return tr("None");
+    case MSO_NAME_ASC:
+      return tr("Name %1").arg(CPN_STR_SW_INDICATOR_UP);
+    case MSO_NAME_DES:
+      return tr("Name %1").arg(CPN_STR_SW_INDICATOR_DN);
+    case MSO_DATE_ASC:
+      return tr("Last Opened %1").arg(CPN_STR_SW_INDICATOR_UP);
+    case MSO_DATE_DES:
+      return tr("Last Opened %1").arg(CPN_STR_SW_INDICATOR_DN);
+    default:
+      return CPN_STR_UNKNOWN_ITEM;
+  }
+}
+
+//  static
+AbstractStaticItemModel * RadioData::modelSortOrderItemModel()
+{
+  AbstractStaticItemModel * mdl = new AbstractStaticItemModel();
+  mdl->setName("radio.modelsortorder");
+
+  for (int i = 0; i < MSO_SORT_COUNT; i++) {
+    mdl->appendToItemList(modelSortOrderToString(i), i);
+  }
+
+  mdl->loadItemList();
+  return mdl;
 }

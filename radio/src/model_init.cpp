@@ -19,7 +19,10 @@
  * GNU General Public License for more details.
  */
 
-#include "opentx.h"
+#include "edgetx.h"
+#include "hal/adc_driver.h"
+#include "input_mapping.h"
+#include "mixes.h"
 
 void clearInputs()
 {
@@ -28,19 +31,18 @@ void clearInputs()
 
 void setDefaultInputs()
 {
-  for (int i=0; i<NUM_STICKS; i++) {
-    uint8_t stick_index = channelOrder(i+1);
+  auto max_sticks = adcGetMaxInputs(ADC_INPUT_MAIN);
+  for (int i = 0; i < max_sticks; i++) {
+    uint8_t stick_index = inputMappingChannelOrder(i);
     ExpoData *expo = expoAddress(i);
-    expo->srcRaw = MIXSRC_Rud - 1 + stick_index;
+    expo->srcRaw = MIXSRC_FIRST_STICK + stick_index;
     expo->curve.type = CURVE_REF_EXPO;
     expo->chn = i;
     expo->weight = 100;
     expo->mode = 3; // TODO constant
-    strncpy(g_model.inputNames[i], STR_VSRCRAW[stick_index] + 1, 3);
-#if LEN_INPUT_NAME > 3
-    g_model.inputNames[i][3] = '\0';
-#endif
+    strncpy(g_model.inputNames[i], getMainControlLabel(stick_index), LEN_INPUT_NAME);
   }
+
   storageDirty(EE_MODEL);
 }
 
@@ -51,7 +53,8 @@ void clearMixes()
 
 void setDefaultMixes()
 {
-  for (int i=0; i<NUM_STICKS; i++) {
+  auto max_sticks = adcGetMaxInputs(ADC_INPUT_MAIN);
+  for (int i = 0; i < max_sticks; i++) {
     MixData * mix = mixAddress(i);
     mix->destCh = i;
     mix->weight = 100;
@@ -76,30 +79,23 @@ void setDefaultGVars()
 #endif
 }
 
+void setDefaultRSSIValues()
+{
+  // Set to legacy FrSky values until
+  // a better solution is found (module specific?)
+  //
+  g_model.rfAlarms.warning = 45;
+  g_model.rfAlarms.critical = 42;
+}
+
 void setVendorSpecificModelDefaults(uint8_t id)
 {
-#if defined(FRSKY_RELEASE)
-  g_model.moduleData[INTERNAL_MODULE].type = IS_PXX2_INTERNAL_ENABLED() ? MODULE_TYPE_ISRM_PXX2 : MODULE_TYPE_XJT_PXX1;
-  g_model.moduleData[INTERNAL_MODULE].channelsCount = defaultModuleChannels_M8(INTERNAL_MODULE);
-  #if defined(EEPROM)
-    g_model.header.modelId[INTERNAL_MODULE] = findNextUnusedModelId(id, INTERNAL_MODULE);
-    modelHeaders[id].modelId[INTERNAL_MODULE] = g_model.header.modelId[INTERNAL_MODULE];
-  #endif
-#endif
-
-    // TODO: we should probably have some default trainer mode
-    //       per radio, depending on what is supported
-    //
-#if defined(PCBXLITE)
-  g_model.trainerData.mode = TRAINER_MODE_MASTER_BLUETOOTH;
-#endif
-
 #if defined(RADIOMASTER_RTF_RELEASE)
   // Those settings are for headless radio
   g_model.trainerData.mode = TRAINER_MODE_SLAVE;
   g_model.moduleData[INTERNAL_MODULE].type = MODULE_TYPE_MULTIMODULE;
-  g_model.moduleData[INTERNAL_MODULE].setMultiProtocol(MODULE_SUBTYPE_MULTI_FRSKY);
-  g_model.moduleData[INTERNAL_MODULE].subType = MM_RF_FRSKY_SUBTYPE_D8;
+  g_model.moduleData[INTERNAL_MODULE].multi.rfProtocol = MODULE_SUBTYPE_MULTI_FRSKY;
+  g_model.moduleData[INTERNAL_MODULE].subType = MULTI_FRSKYD_SUBTYPE_D8;
   g_model.moduleData[INTERNAL_MODULE].failsafeMode = FAILSAFE_NOPULSES;
 #endif
 }
@@ -109,6 +105,7 @@ void applyDefaultTemplate()
   setDefaultInputs();
   setDefaultMixes();
   setDefaultGVars();
+  setDefaultRSSIValues();
 
   setDefaultModelRegistrationID();
 
@@ -117,23 +114,43 @@ void applyDefaultTemplate()
   g_model.functionSwitchGroup = DEFAULT_FS_GROUPS;
   g_model.functionSwitchStartConfig = DEFAULT_FS_STARTUP_CONFIG;
   g_model.functionSwitchLogicalState = 0;
+#if defined(FUNCTION_SWITCHES_RGB_LEDS)
+  for (uint8_t i = 0; i < NUM_FUNCTIONS_SWITCHES; i++) {
+    g_model.functionSwitchLedOFFColor[i].setColor(0);
+    g_model.functionSwitchLedONColor[i].setColor(0xFFFFFF);
+  }
+#endif
+#endif
+
+#if defined(FUNCTION_SWITCHES_RGB_LEDS)
+  for (uint8_t i = 0; i < NUM_FUNCTIONS_SWITCHES; i++) {
+    g_model.functionSwitchLedOFFColor[i].setColor(0);
+    g_model.functionSwitchLedONColor[i].setColor(0xFFFFFF);
+  }
 #endif
 
 #if defined(COLORLCD)
 
-#if !defined(GTESTS)
-  loadDefaultLayout();
-#endif
+  LayoutFactory::loadDefaultLayout();
 
   // enable switch warnings
-  for (int i = 0; i < NUM_SWITCHES; i++) {
-    g_model.switchWarningState |= (1 << (3*i));
+  for (uint64_t i = 0; i < MAX_SWITCHES; i++) {
+    if (SWITCH_EXISTS(i)) {
+      g_model.switchWarning |= (1ull << (3ull * i));
+    }
+  }
+#else
+  // enable switch warnings
+  for (uint64_t i = 0; i < MAX_SWITCHES; i++) {
+    if (SWITCH_WARNING_ALLOWED(i))
+      g_model.switchWarning |= (1ull << (3ull * i));
   }
 #endif
 
-  // TODO: what about switch warnings in non-color LCD radios?
+#if defined(USE_HATS_AS_KEYS)
+  g_model.hatsMode = HATSMODE_GLOBAL;
+#endif
 }
-
 
 void setModelDefaults(uint8_t id)
 {
@@ -148,7 +165,7 @@ void setModelDefaults(uint8_t id)
 #endif
   strAppendUnsigned(strAppend(g_model.header.name, STR_MODEL), id, 2);
 
-#if defined(LUA) && defined(PCBTARANIS) // Horus uses menuModelWizard() for wizard
+#if defined(LUA) && defined(PCBTARANIS)
   if (isFileAvailable(WIZARD_PATH "/" WIZARD_NAME)) {
     f_chdir(WIZARD_PATH);
     luaExec(WIZARD_NAME);

@@ -1,7 +1,8 @@
 /*
- * Copyright (C) OpenTX
+ * Copyright (C) EdgeTX
  *
  * Based on code named
+ *   opentx - https://github.com/opentx/opentx
  *   th9x - http://code.google.com/p/th9x
  *   er9x - http://code.google.com/p/er9x
  *   gruvin9x - http://code.google.com/p/gruvin9x
@@ -76,6 +77,8 @@ class SensorData {
       TELEM_CELL_INDEX_4,
       TELEM_CELL_INDEX_5,
       TELEM_CELL_INDEX_6,
+      TELEM_CELL_INDEX_7,
+      TELEM_CELL_INDEX_8,
       TELEM_CELL_INDEX_HIGHEST,
       TELEM_CELL_INDEX_DELTA,
       TELEM_CELL_INDEX_LAST = TELEM_CELL_INDEX_DELTA
@@ -141,6 +144,17 @@ class SensorData {
       UNIT_DATETIME_SEC
     };
 
+    enum SensorTypeMasks {
+      SensorTypeFlagNone     = 1 << 1,  // AbstractItemModel::IMDG_None
+      SensorTypeFlagNeg      = 1 << 2,  // AbstractItemModel::IMDG_Negative
+      SensorTypeFlagPos      = 1 << 3,  // AbstractItemModel::IMDG_Positive
+      SensorTypeFlagVario    = 1 << 4,
+      SensorTypeContextNone  = SensorTypeFlagNone,
+      SensorTypeContextNeg   = SensorTypeFlagNeg   | SensorTypeFlagNone,
+      SensorTypeContextPos   = SensorTypeFlagPos   | SensorTypeFlagNone,
+      SensorTypeContextVario = SensorTypeFlagVario | SensorTypeFlagNone,
+    };
+
     SensorData() { clear(); }
     unsigned int type; // custom / formula
     unsigned int id;
@@ -198,6 +212,7 @@ class SensorData {
 
     static QString sourceToString(const ModelData * model, const int index, const bool positivesign = false);
     static bool isSourceAvailable(const ModelData * model, const int index);
+    static bool isSourceVario(const ModelData * model, const int index);
     static QString idToString(const int value);
     static QString typeToString(const int value);
     static QString formulaToString(const int value);

@@ -21,8 +21,6 @@
 
 #pragma once
 
-#pragma once
-
 #include "updateinterface.h"
 
 class UpdateMultiProtocol : public UpdateInterface
@@ -34,4 +32,6 @@ class UpdateMultiProtocol : public UpdateInterface
     explicit UpdateMultiProtocol(QWidget * parent);
     virtual ~UpdateMultiProtocol() {}
 
+  protected:
+    virtual void assetSettingsInit() override;
 };

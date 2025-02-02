@@ -21,81 +21,36 @@
 
 #pragma once
 
-#include "repomodels.h"
 #include "constants.h"
-#include "progresswidget.h"
+#include "appdata.h"
+#include "updatestatus.h"
+#include "updatenetwork.h"
+#include "repo.h"
+#include "updateparameters.h"
 
 #include <QtCore>
 #include <QWidget>
-#include <QtNetwork/QNetworkAccessManager>
-#include <QtNetwork/QNetworkReply>
 
-class UpdateParameters : public QWidget
+class UpdateInterface : public QWidget
 {
     Q_OBJECT
 
   public:
-    enum UpdateFilterType {
-      UFT_None,
-      UFT_Exact,
-      UFT_Startswith,
-      UFT_Endswith,
-      UFT_Contains,
-      UFT_Expression,
+
+    //  The CID is used as a key to the application settings therefore
+    //  ids must be explicit so no renumbering if components removed
+    //  new components must be added to the end of the enum
+    enum ComponentIdentity {
+      CID_Unknown         = -1,
+      CID_SDCard          = 0,
+      CID_Firmware        = 1,
+      CID_Sounds          = 2,
+      CID_Themes          = 3,
+      CID_MultiProtocol   = 4,
+      CID_Companion       = 5,
+      CID_CloudBuild      = 6,
     };
-
-    static QStringList updateFilterTypeList();
-
-    static QString updateFilterTypeToString(UpdateFilterType uft);
-
-    struct AssetParams {
-      int flags;
-      UpdateFilterType filterType;
-      QString filter;
-      int maxExpected;
-      QString destSubDir;
-      UpdateFilterType copyFilterType;
-      QString copyFilter;
-    };
-
-    struct GeneralParams {
-      int flags;
-      QString fwFlavour;
-      QString language;
-      QString currentRelease;
-      QString updateRelease;
-      QString downloadDir;
-      bool decompressDirUseDwnld;
-      QString decompressDir;
-      bool updateDirUseSD;
-      QString updateDir;
-      QVector<AssetParams> assets;
-    };
-
-    GeneralParams data;
-
-    UpdateParameters(QWidget * parent);
-    virtual ~UpdateParameters() {}
-
-    AssetParams & addAsset();
-    QString buildFilterPattern(const UpdateFilterType filterType, const QString & filter);
-
-    UpdateParameters& operator=(const UpdateParameters& source);
-};
-
-class UpdateInterface : public QWidget
-{
-  Q_OBJECT
-
-  public:
-
-    enum DownloadDataType {
-      DDT_Binary,
-      DDT_Content,
-      DDT_SaveToFile,
-      DDT_MetaData,
-    };
-    Q_ENUM(DownloadDataType)
+    Q_ENUM(ComponentIdentity)
 
     enum UpdateFlags {
       UPDFLG_None            = 0,
@@ -110,181 +65,130 @@ class UpdateInterface : public QWidget
       UPDFLG_Housekeeping    = 1 << 9,
       UPDFLG_AsyncInstall    = 1 << 10,
       UPDFLG_DelDownloads    = 1 << 11,
-      UPDFLG_Common          = UPDFLG_Preparation | UPDFLG_Download | UPDFLG_Decompress | UPDFLG_CopyDest | UPDFLG_Housekeeping,
+      UPDFLG_DelDecompress   = 1 << 12,
+      UPDFLG_Build           = 1 << 13,
+      UPDFLG_Common_Asset    = UPDFLG_Download | UPDFLG_Decompress | UPDFLG_CopyDest,
+      UPDFLG_Common          = UPDFLG_Common_Asset | UPDFLG_Preparation | UPDFLG_Housekeeping,
     };
     Q_ENUM(UpdateFlags)
 
-    explicit UpdateInterface(QWidget * parent);
+    enum ProcessResult {
+      PROC_RESULT_FAIL,
+      PROC_RESULT_SUCCESS,
+      PROC_RESULT_CANCELLED,
+    };
+    Q_ENUM(ProcessResult)
+
+    typedef bool (*processFunc)();
+
+    explicit UpdateInterface(QWidget * parent, ComponentIdentity id, QString name, Repo::RepoType repoType,
+                             const QString & path, const QString & nightly = QString(), const int resultsPerPage= -1);
     virtual ~UpdateInterface();
 
-    const QString getName() const { return name; }
+    virtual void assetSettingsSave();
+    virtual const bool isReleaseLatest();
+    virtual const bool isUpdateAvailable();
+    virtual const bool isVersionLatest(const QString & current, const QString & latest);
+    virtual const QString releaseCurrent();
+    virtual const QString releaseLatest();
+    virtual const QString releaseUpdate();
+    virtual const QString versionCurrent();
+
+    const int id() const;
+    const bool isUpdateable() const;
+    const QString name() const;
+    UpdateParameters* const params() const;
+    void radioProfileChanged();
+    void releaseClear();
+    const QStringList releaseList();
+    void resetEnvironment();
+    void setReleaseChannel(const int channel);
+    void setRunUpdate();
+    bool update(ProgressWidget * progress = nullptr);
+
+  signals:
+    void stopping();
+    void finished();
 
   protected:
-    friend class UpdateFactories;
-
-    ReleasesMetaData *releases;
-    AssetsMetaData *assets;
-    UpdateParameters *dfltParams;
-    UpdateParameters *runParams;
-    ProgressWidget *progress;
-
-    QString name;
-    int resultsPerPage;
-    QString downloadDir;
-    QString decompressDir;
-    QString updateDir;
-    int logLevel;
-
-    virtual bool manualUpdate(ProgressWidget * progress = nullptr);
-
-    virtual bool update();
-    virtual bool preparation();
-    virtual bool flagAssets();
-    virtual bool download();
-    virtual bool decompress();
-    virtual bool copyToDestination();
+    virtual void assetSettingsInit() = 0;
+    virtual void assetSettingsLoad();
+    virtual int asyncInstall();
+    virtual int build();
+    virtual bool buildFlaggedAsset(const int row);
     virtual bool copyAsset();
-    virtual bool housekeeping();
-    virtual bool asyncInstall();
+    virtual int copyToDestination();
+    virtual int decompress();
+    virtual int download();
+    virtual bool downloadFlaggedAsset(const int row);
+    virtual bool flagAssets();
+    virtual int housekeeping();
+    virtual int preparation();
 
-    virtual const bool isUpdateAvailable();
-    virtual const QString currentVersion();
-    virtual const QString currentRelease();
-    virtual const QString updateRelease();
-    virtual const bool isLatestRelease();
-    virtual const bool isLatestVersion(const QString & current, const QString & latest);
-    virtual const QString latestRelease();
-    void clearRelease();
-    const QStringList getReleases();
-
-    void setName(QString name);
-    void setRepo(QString repo);
-    void setResultsPerPage(int cnt) { resultsPerPage = cnt; }
-    void setReleasesNightlyName(QString name) { releases->setNightlyName(name); }
-
-    void initParamFolders(UpdateParameters * params);
-    const UpdateParameters * const getDefaultParams() { return dfltParams; }
-    UpdateParameters * getRunParams() { return runParams; }
-    void resetRunEnvironment();
-    void setRunUpdate() { runParams->data.flags |= UPDFLG_Update; }
-    bool isUpdateable();
-
-    bool repoReleasesMetaData();
-    bool repoReleaseAssetsMetaData();
-
-    bool downloadReleasesMetaData();
-    bool downloadReleaseLatestMetaData();
-    bool downloadReleaseMetaData(const int releaseId);
-
-    bool downloadReleaseAssetsMetaData(const int releaseId);
-    bool downloadAssetMetaData(const int assetId);
-    bool getSetAssets(const UpdateParameters::AssetParams & ap);
-    bool downloadAsset(int row);
-    bool downloadFlaggedAssets();
-    bool decompressAsset(int row);
-    bool decompressFlaggedAssets();
+    bool buildFlaggedAssets();
+    bool copyFiles();
     bool copyFlaggedAssets();
     bool copyStructure();
-    bool copyFiles();
-    bool saveReleaseSettings();
+    bool decompressAsset(int row);
+    const QString decompressDir() const;
+    bool decompressFlaggedAssets();
+    const QString downloadDir() const;
+    bool downloadFlaggedAssets();
+    bool filterAssets(const UpdateParameters::AssetParams & ap);
+    void init();
+    const bool isSettingsIndexValid() const;
+    UpdateNetwork* const network() const;
+    Repo* const repo() const;
+    bool retrieveAssetsJsonFile(const QString & assetName, QJsonDocument * json);
+    bool retrieveRepoJsonFile(const QString & filename, QJsonDocument * json);
+    bool setFilteredAssets(const UpdateParameters::AssetParams & ap);
+    void setFirmwareFlavour();
+    void setLanguage();
+    void setParamFolders();
+    void setReleaseId(QString name);
+    UpdateStatus* const status() const;
+    const bool isStopping() const { return m_stopping; }
+    const QString updateDir() const;
 
-    bool downloadAssetToBuffer(const int assetId);
-    bool downloadTextFileToBuffer(const QString & path);
-    void downloadFileToBuffer(const QString & url);
-    bool convertDownloadToJson(QJsonDocument * json);
-    bool decompressArchive(const QString & archivePath, const QString & destPath);
-    QByteArray * getDownloadBuffer() { return buffer; }
-
-    void reportProgress(const QString & text, const int type = QtInfoMsg);
-    void progressMessage(const QString & text);
-    void criticalMsg(const QString & msg);
-    static QString downloadDataTypeToString(DownloadDataType val);
-    static QString updateFlagsToString(UpdateFlags val);
-    void initFlavourLanguage(UpdateParameters * params);
-    int settingsIdx() { return m_settingsIdx; }
+    static QStringList versionToStringList(QString version);
+    static const QString updateFlagsToString(const int flags);
+    static const QString updateFlagToString(const int flag);
 
   private slots:
-    void onDownloadFinished(QNetworkReply * reply, DownloadDataType ddt, int subtype);
+    void onStatusCancelled();
+    void processEvents();
 
   private:
-    QNetworkAccessManager manager;
-    QNetworkRequest request;
-    QNetworkReply *reply;
-    QByteArray *buffer;
-    QFile *file;
-    QUrl url;
+    const ComponentIdentity m_id;
+    const QString m_name;
+    UpdateParameters* const m_params;
+    UpdateStatus* const m_status;
+    UpdateNetwork* const m_network;
+    Repo* const m_repo;
+    QString m_downloadDir;
+    QString m_decompressDir;
+    QString m_updateDir;
+    bool m_stopping;
+    int m_result;
+    QEventLoop m_eventLoop;
+    QTimer m_timer;
 
-    bool downloadSuccess;
-    int m_settingsIdx;
-
-    static QString semanticVersion(QString version);
-
-    void setSettingsIdx();
-    bool setRunFolders();
+    void appSettingsInit();
     bool checkCreateDirectory(const QString & dirSetting, const UpdateFlags flag);
+    bool decompressArchive(const QString & archivePath, const QString & destPath);
+    int releaseSettingsSave();
+    bool setRunFolders();
+    bool validateFolder(QString & fldr);
 
-    void downloadMetaData(const MetaDataType mdt, const QString & url);
-    void download(const DownloadDataType type, const int subtype, const QString & urlStr, const char * header, const QString & filePath);
-    void downloadBinaryToFile(const QString & url, const QString & filename);
+    bool isOkay() { return m_result == PROC_RESULT_SUCCESS && !m_stopping; }
+    const QString resultToString() const;
 
-    void parseMetaData(int mdt);
-};
-
-class UpdateFactoryInterface
-{
-  public:
-    explicit UpdateFactoryInterface() {}
-    virtual ~UpdateFactoryInterface() {}
-    virtual UpdateInterface * instance() = 0;
-    virtual QString name() = 0;
-};
-
-template <class T>
-class UpdateFactory : public UpdateFactoryInterface
-{
-  public:
-    explicit UpdateFactory(QWidget * parent) :
-      UpdateFactoryInterface(),
-      m_instance(new T(parent)) {}
-
-    virtual ~UpdateFactory() {}
-
-    virtual UpdateInterface * instance() { return m_instance; }
-    virtual QString name() { return m_instance->getName(); }
-
-  private:
-    UpdateInterface *m_instance;
-};
-
-class UpdateFactories : public QWidget
-{
-  Q_OBJECT
-
-  public:
-    explicit UpdateFactories(QWidget * parent = nullptr);
-    virtual ~UpdateFactories();
-
-    void registerUpdateFactory(UpdateFactoryInterface * factory);
-    void registerUpdateFactories();
-    void unregisterUpdateFactories();
-
-    const UpdateParameters * const getDefaultParams(const QString & name);
-    UpdateParameters * const getRunParams(const QString & name);
-    void resetRunEnvironment(const QString & name);
-    void resetAllRunEnvironments();
-    void setRunUpdate(const QString & name);
-    const QMap<QString, int> sortedComponentsList(bool updateableOnly = false);
-
-    void clearRelease(const QString & name);
-    const QString currentRelease(const QString & name);
-    const QString updateRelease(const QString & name);
-    const bool isLatestRelease(const QString & name);
-    const QString latestRelease(const QString & name);
-    const QStringList releases(const QString & name);
-
-    bool manualUpdate(ProgressWidget * progress = nullptr);
-    const bool isUpdatesAvailable(QStringList & names);
-
-  private:
-    QVector<UpdateFactoryInterface *> registeredUpdateFactories;
+    void runAsyncInstall();
+    void runBuild();
+    void runCopyToDestination();
+    void runDecompress();
+    void runDownload();
+    void runHousekeeping();
+    void runPreparation();
+    void runReleaseSettingsSave();
 };

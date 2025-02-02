@@ -1,7 +1,8 @@
 /*
- * Copyright (C) OpenTX
+ * Copyright (C) EdgeTX
  *
  * Based on code named
+ *   opentx - https://github.com/opentx/opentx
  *   th9x - http://code.google.com/p/th9x
  *   er9x - http://code.google.com/p/er9x
  *   gruvin9x - http://code.google.com/p/gruvin9x
@@ -34,6 +35,7 @@
 #include <QListWidget>
 
 class QToolBar;
+class StatusDialog;
 
 namespace Ui {
 class MdiChild;
@@ -52,11 +54,10 @@ class MdiChild : public QWidget
       ACT_GEN_CPY,
       ACT_GEN_PST,
       ACT_GEN_SIM,
-      ACT_ITM_EDT,  // edit model/rename category
-      ACT_ITM_DEL,  // delete model or cat
-      ACT_LBL_ADD,
-      ACT_LBL_DEL,
-      ACT_MDL_ADD,  // model actions...
+      ACT_GEN_SRT,  // model sort order
+      ACT_MDL_EDT,  // model actions...
+      ACT_MDL_DEL,
+      ACT_MDL_ADD,
       ACT_MDL_CPY,
       ACT_MDL_CUT,
       ACT_MDL_PST,
@@ -69,15 +70,19 @@ class MdiChild : public QWidget
       ACT_MDL_DFT,  // set as DeFaulT
       ACT_MDL_PRT,  // print
       ACT_MDL_SIM,
+      ACT_LBL_ADD,  // label actions..
+      ACT_LBL_DEL,
+      ACT_LBL_MVU,  // Move up
+      ACT_LBL_MVD,  // Move down
+      ACT_LBL_REN,  // Move down
       ACT_ENUM_END
     };
 
-    MdiChild(QWidget *parent = Q_NULLPTR, QWidget * parentWin = Q_NULLPTR, Qt::WindowFlags f = Qt::WindowFlags());
+    MdiChild(QWidget *parent = nullptr, QWidget * parentWin = nullptr, Qt::WindowFlags f = Qt::WindowFlags());
     ~MdiChild();
 
     QString currentFile() const;
     QString userFriendlyCurrentFile() const;
-    QVector<int> getSelectedCategories() const;
     QVector<int> getSelectedModels() const;
     QList<QAction *> getGeneralActions();
     QList<QAction *> getEditActions();
@@ -92,7 +97,7 @@ class MdiChild : public QWidget
     bool saveAs(bool isNew=false);
     bool saveFile(const QString & fileName, bool setCurrent=true);
     void closeFile(bool force = false);
-    void writeSettings();
+    void writeSettings(StatusDialog * status, bool toRadio = true);
     void print(int model=-1, const QString & filename="");
     void onFirmwareChanged();
 
@@ -111,6 +116,7 @@ class MdiChild : public QWidget
     void updateNavigation();
     void updateTitle();
     void setModified();
+    void setCurrentModelModified();
     void retranslateUi();
     void showModelsListContextMenu(const QPoint & pos);
     void showLabelsContextMenu(const QPoint & pos);
@@ -140,8 +146,11 @@ class MdiChild : public QWidget
     void modelExport();
     void labelAdd();
     void labelDelete();
-    void modelLabelsChanged();
-    void labelRenameFault(QString msg);
+    void labelRename();
+    void labelMoveUp();
+    void labelMoveDown();
+    void modelLabelsChanged(int index);
+    void labelsFault(QString msg);
     void wizardEdit();
     void modelDuplicate();
 
@@ -159,10 +168,12 @@ class MdiChild : public QWidget
     void pasteGeneralData(const QMimeData * mimeData);
 
   private:
-    QAction *addAct(Actions actId, const QString & icon, const char * slot = 0, const QKeySequence & shortcut = 0, QObject * slotObj = NULL);
+    QAction *addAct(Actions actId, const QString & icon, const char * slot = 0, const QKeySequence & shortcut = 0, QObject * slotObj = nullptr);
 
     QModelIndex getCurrentIndex() const;
     int getCurrentModel() const;
+    QModelIndex getDataIndex(QModelIndex viewIndex) const;
+    int getDataModel(QModelIndex viewIndex) const;
     int countSelectedModels() const;
     bool hasSelectedModel();
     bool setSelectedModel(const int modelIndex);
@@ -198,6 +209,7 @@ class MdiChild : public QWidget
     Ui::MdiChild * ui;
     ModelsListModel * modelsListModel;
     LabelsModel * labelsListModel;
+    ModelsListProxyModel * modelsListProxyModel;
     QWidget * parentWindow;
 
     QString curFile;
@@ -216,6 +228,10 @@ class MdiChild : public QWidget
     bool showLabelToolbar;
     bool forceCloseFlag;
     const quint16 stateDataVersion;
+    AbstractStaticItemModel* modelSortOrderItemModel;
+    QComboBox* cboModelSortOrder;
+    void setModelModified(const int modelIndex, bool cascade = true);
+    QAction * actionsSeparator();
 };
 
 // This will draw the drop indicator across all columns of a model View (vs. in just one column), and lets us make the indicator more obvious.

@@ -24,47 +24,62 @@
 #include <QMessageBox>
 
 UpdateSDCard::UpdateSDCard(QWidget * parent) :
-  UpdateInterface(parent)
+  UpdateInterface(parent, CID_SDCard, tr("SD Card"), Repo::REPO_TYPE_GITHUB,
+                  QString(GH_API_REPOS_EDGETX).append("/edgetx-sdcard"), "Latest")
 {
-  setName("SD Card");
-  setRepo(QString(GH_REPOS_EDGETX).append("/edgetx-sdcard"));
+  init(); // call after UpdateInterface ctor due to virtual functions
+}
 
-  dfltParams->data.flags = UPDFLG_Common | UPDFLG_Locked;
+void UpdateSDCard::assetSettingsInit()
+{
+  if (!isSettingsIndexValid())
+    return;
 
-  UpdateParameters::AssetParams &ap = dfltParams->addAsset();
-  ap.filterType = UpdateParameters::UFT_Startswith;
-  ap.filter = QString("%FWFLAVOUR%-");
-  ap.maxExpected = 1;
-  ap.flags = dfltParams->data.flags | UPDFLG_CopyStructure;
+  g.component[id()].initAllAssets();
+
+  ComponentAssetData &cad = g.component[id()].asset[0];
+  cad.desc("files");
+  cad.processes(UPDFLG_Common_Asset);
+  cad.flags(cad.processes() | UPDFLG_Locked | UPDFLG_CopyStructure);
+  cad.filterType(UpdateParameters::UFT_Startswith);
+  cad.filter("%FWFLAVOUR%-");
+  cad.maxExpected(1);
+
+  qDebug() << "Asset settings initialised";
 }
 
 bool UpdateSDCard::flagAssets()
 {
-  progressMessage(tr("Flagging assets"));
-  /*
-  {
-    "targets": [
-      ["Flysky NV14", "nv14-", "nv14"],
-      ["FrSky Horus X10", "x10-", "horus"],
-  */
-
-  const QString mappingfile = "sdcard.json";
-
-  if (!downloadTextFileToBuffer(mappingfile)) {
-    return false;
-  }
+  status()->progressMessage(tr("Flagging assets"));
 
   QJsonDocument *json = new QJsonDocument();
 
-  if (!convertDownloadToJson(json)) {
-    return false;
+  const QString jsonFile("sdcard.json");
+
+  if (!retrieveAssetsJsonFile(jsonFile, json)) {
+    status()->reportProgress(tr("Unable to retrieve asset '%1' from release '%2'").arg(jsonFile).arg(repo()->releases()->name()), QtDebugMsg);
+    //  assume older release where file not an asset
+    if (!retrieveRepoJsonFile(jsonFile, json)) {
+      status()->reportProgress(tr("Unable to retrieve file '%1' from repo '%2'").arg(jsonFile).arg(repo()->path()), QtCriticalMsg);
+      delete json;
+      return false;
+    }
   }
 
-  const UpdateParameters::AssetParams & ap = runParams->data.assets.at(0);
+  /*
+  {
+    "targets": [
+      ["Flysky NV14", "nv14-", "c320x480"],
+      ["FrSky Horus X10", "x10-", "c480x272"],
+  */
 
-  QRegularExpression filter(runParams->buildFilterPattern(ap.filterType, ap.filter), QRegularExpression::CaseInsensitiveOption);
+  const UpdateParameters::AssetParams & ap = params()->assets.at(0);
+
+  QRegularExpression filter(params()->buildFilterPattern(ap.filterType, ap.filter), QRegularExpression::CaseInsensitiveOption);
   bool found = false;
   QString sdimage;
+
+  //qDebug() << *json;
 
   if (json->isObject()) {
     const QJsonObject &obj = json->object();
@@ -91,7 +106,7 @@ bool UpdateSDCard::flagAssets()
   delete json;
 
   if (!found) {
-    reportProgress(tr("Radio flavour %1 not listed in %2").arg(runParams->data.fwFlavour).arg(mappingfile), QtCriticalMsg);
+    status()->reportProgress(tr("Radio flavour '%1' not listed in '%2'").arg(params()->fwFlavour).arg(jsonFile), QtCriticalMsg);
     return false;
   }
 
@@ -99,7 +114,7 @@ bool UpdateSDCard::flagAssets()
   sd.filterType = UpdateParameters::UFT_Startswith;
   sd.filter = sdimage;
 
-  if (!getSetAssets(sd))
+  if (!setFilteredAssets(sd))
     return false;
 
   return true;

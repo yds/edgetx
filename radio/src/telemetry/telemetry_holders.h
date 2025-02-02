@@ -19,8 +19,7 @@
  * GNU General Public License for more details.
  */
 
-#ifndef _TELEMETRY_HOLDERS_H_
-#define _TELEMETRY_HOLDERS_H_
+#pragma once
 
 #include <inttypes.h>
 #include <string.h>
@@ -28,7 +27,7 @@
 
 #define TELEMETRY_AVERAGE_COUNT   3     // we actually average one more reading!
 #define RAW_FRSKY_MINMAX(v)       v.values[TELEMETRY_AVERAGE_COUNT-1]
-#define MAX_CELLS                 6
+#define MAX_CELLS                 8
 
 class TelemetryValue {
   public:
@@ -131,5 +130,3 @@ class TelemetryMinDecorator: public T {
   protected:
     uint8_t _min;
 };
-
-#endif // _TELEMETRY_HOLDERS_H_

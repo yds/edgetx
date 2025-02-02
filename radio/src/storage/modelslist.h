@@ -19,8 +19,7 @@
  * GNU General Public License for more details.
  */
 
-#ifndef _MODELSLIST_H_
-#define _MODELSLIST_H_
+#pragma once
 
 #include <stdint.h>
 
@@ -35,10 +34,6 @@
 
 #include "sdcard.h"
 
-#if !defined(SDCARD_YAML)
-#include "sdcard_raw.h"
-#endif
-
 #include "dataconstants.h"
 #include "rtc.h"
 
@@ -47,6 +42,12 @@
   (LEN_MODEL_FILENAME + sizeof(" F,FF F,3F,FF\r\n") - 1)
 
 #define DEFAULT_MODEL_SORT NAME_ASC
+
+#if !PORTRAIT_LCD // Landscape
+#define LABEL_TRUNCATE_LENGTH 21
+#else
+#define LABEL_TRUNCATE_LENGTH 16
+#endif
 
 struct ModelData;
 struct ModuleData;
@@ -71,7 +72,7 @@ class ModelCell
   char modelName[LEN_MODEL_NAME + 1] = "";
   char modelFinfoHash[FILE_HASH_LENGTH + 1] = "";
 #if LEN_BITMAP_NAME > 0
-  char modelBitmap[LEN_BITMAP_NAME] = "";
+  char modelBitmap[LEN_BITMAP_NAME + 1] = "";
 #endif
   gtime_t lastOpened = 0;
   bool _isDirty = true;
@@ -134,8 +135,7 @@ class ModelMap : protected std::multimap<uint16_t, ModelCell *>
       const std::string &,
       std::function<void(const char *file, int progress)> progress = nullptr);
   bool moveLabelTo(unsigned current, unsigned newind);
-  bool renameLabel(
-      const std::string &from, const std::string &to,
+  bool renameLabel(const std::string &from, std::string to,
       std::function<void(const char *file, int progress)> progress = nullptr);
   std::string getCurrentLabel() { return currentlabel; };
   void setCurrentLabel(const std::string &lbl)
@@ -143,7 +143,7 @@ class ModelMap : protected std::multimap<uint16_t, ModelCell *>
     currentlabel = lbl;
     setDirty();
   }
-  std::string getLabelString(ModelCell *, const char *noresults = "");
+  std::string getBulletLabelString(ModelCell *, const char *noresults = "");
   void setDirty(bool save = false);
   bool isDirty() { return _isDirty; }
 
@@ -152,6 +152,7 @@ class ModelMap : protected std::multimap<uint16_t, ModelCell *>
   {
     this->filtlbls = std::move(filtlbls);
   }
+  void clearFilter() { filtlbls.clear(); }
   void addFilteredLabel(const std::string &lbl);
   bool isLabelFiltered(const std::string &lbl);
   std::set<uint32_t> filteredLabels() { return filtlbls; }
@@ -161,6 +162,9 @@ class ModelMap : protected std::multimap<uint16_t, ModelCell *>
 
   static std::string toCSV(const LabelsVector &labels);
   static LabelsVector fromCSV(const char *str);
+  static void escapeCSV(std::string &str);
+  static void unEscapeCSV(std::string &str);
+  static void removeYAMLChars(std::string &str);
   static void replace_all(std::string &str,
                           const std::string &from,
                           const std::string &to);
@@ -213,21 +217,10 @@ class ModelsList : public ModelsVector
   void init();
 
  public:
-  enum class Format {
-    txt,
-#if defined(SDCARD_YAML)
-    yaml,
-    yaml_txt,
-    load_default = yaml,
-#else
-    load_default = txt,
-#endif
-  };
-
   ModelsList();
   ~ModelsList();
 
-  bool load(Format fmt = Format::load_default);
+  bool load();
   const char *save(LabelsVector newOrder=LabelsVector());
   void clear();
 
@@ -241,8 +234,6 @@ class ModelsList : public ModelsVector
     return std::vector<ModelCell *>::size();
   }
 
-  bool readNextLine(char *line, int maxlen);
-
   ModelCell *addModel(const char *name, bool save = true, ModelCell *copyCell = nullptr);
   bool removeModel(ModelCell *model);
   bool moveModelTo(unsigned curindex, unsigned toindex);
@@ -250,7 +241,7 @@ class ModelsList : public ModelsVector
   bool isModelIdUnique(uint8_t moduleIdx, char *warn_buf, size_t warn_buf_len);
   uint8_t findNextUnusedModelId(uint8_t moduleIdx);
 
-  typedef struct {
+  typedef struct _filedat {
     std::string name;
     char hash[FILE_HASH_LENGTH + 1];
     bool curmodel = false;
@@ -261,16 +252,11 @@ class ModelsList : public ModelsVector
  protected:
   FIL file;
 
-  bool loadTxt();
-#if defined(SDCARD_YAML)
   bool loadYaml();
   bool loadYamlDirScanner();
-#endif
 };
 
 ModelLabelsVector getUniqueLabels();
 
 extern ModelsList modelslist;
 extern ModelMap modelslabels;
-
-#endif  // _MODELSLIST_H_

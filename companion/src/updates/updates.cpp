@@ -20,7 +20,7 @@
  */
 
 #include "updates.h"
-#include "updateinterface.h"
+#include "updatefactories.h"
 #include "updatesdialog.h"
 #include "progressdialog.h"
 #include "progresswidget.h"
@@ -28,6 +28,7 @@
 #include "helpers.h"
 
 #include <QMessageBox>
+#include <QApplication>
 
 Updates::Updates(QWidget * parent, UpdateFactories * updateFactories) :
   QWidget(parent),
@@ -39,9 +40,9 @@ Updates::~Updates()
 {
 }
 
-void Updates::checkForUpdates(bool manual)
+void Updates::autoUpdates(bool interactive)
 {
-  if (!manual) {
+  if (!interactive) {
     if (g.updateCheckFreq() == AppData::UPDATE_CHECK_MANUAL)
       return;
 
@@ -65,45 +66,72 @@ void Updates::checkForUpdates(bool manual)
 
   g.lastUpdateCheck(QDateTime::currentDateTime().toString(Qt::ISODate));
 
-  QStringList list;
+  factories->resetAllEnvironments();
 
-  if (!factories->isUpdatesAvailable(list)) {
-    if (manual)
+  QMap<QString, int> components;
+
+  if (!factories->isUpdateAvailable(components)) {
+    if (interactive)
       QMessageBox::information(parentWidget(), CPN_STR_APP_NAME, tr("No updates available at this time"));
     return;
   }
 
-  if (QMessageBox::question(parentWidget(), CPN_STR_APP_NAME % ": " % tr("Checking for Updates"),
-                            tr("Updates available for:\n  %1\n\nUpdate now?").arg(list.join("\n  ")),
-                            (QMessageBox::Yes | QMessageBox::No), QMessageBox::No) == QMessageBox::Yes) {
-    doUpdates();
+  QMapIterator<QString, int> it(components);
+
+  QStringList list;
+
+  while (it.hasNext()) {
+    it.next();
+    list << it.key();
   }
+
+  if (QMessageBox::question(parentWidget(), CPN_STR_APP_NAME % ": " % tr("Checking for Updates"),
+                            tr("Updates available for:\n  - %1\n\nProcess now?").arg(list.join("\n  - ")),
+                            (QMessageBox::Yes | QMessageBox::No), QMessageBox::No) == QMessageBox::No) {
+    return;
+  }
+
+  it.toFront();
+
+  while (it.hasNext()) {
+    it.next();
+    UpdateInterface *iface = factories->instance(it.value());
+    iface->setRunUpdate();
+    iface->releaseUpdate();
+  }
+
+  runUpdate();
 }
 
-void Updates::doUpdates()
+void Updates::manualUpdates()
 {
   if (factories->sortedComponentsList(true).isEmpty()) {
     QMessageBox::warning(this, CPN_STR_APP_NAME, tr("No components have been flagged to check in Update Settings!"));
     return;
   }
 
-  factories->resetAllRunEnvironments();
+  factories->resetAllEnvironments();
 
   UpdatesDialog *dlg = new UpdatesDialog(this, factories);
+  dlg->deleteLater();
 
+  if (dlg->exec())
+    runUpdate();
+}
+
+void Updates::runUpdate()
+{
   bool ok = false;
-
-  if (dlg->exec()) {
-    ProgressDialog progressDialog(this, tr("Update Components"), CompanionIcon("fuses.png"), true);
-    progressDialog.progress()->lock(true);
-    progressDialog.progress()->setInfo(tr("Starting..."));
-    ok = factories->manualUpdate(progressDialog.progress());
-    progressDialog.progress()->lock(false);
-    progressDialog.progress()->setInfo(tr("Finished %1").arg(ok ? tr("successfully") : tr("with errors")));
-    progressDialog.exec();
-  }
-
-  delete dlg;
+  ProgressDialog progressDialog(this, tr("Update Components"), CompanionIcon("fuses.png"), true);
+  progressDialog.setProcessStarted();
+  progressDialog.progress()->setInfo(tr("Starting..."));
+  ok = factories->updateAll(progressDialog.progress());
+  progressDialog.setProcessStopped();
+  progressDialog.progress()->setInfo(tr("Finished %1").arg(ok ? tr("successfully") : tr("with errors")));
+  progressDialog.progress()->setValue(progressDialog.progress()->maximum());
+  progressDialog.progress()->refresh();
+  QApplication::processEvents();
+  progressDialog.exec();
 
   if (ok)
     checkRunSDSync();

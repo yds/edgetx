@@ -21,12 +21,12 @@
 
 #pragma once
 
-#include "libopenui/src/bitfield.h"
+#include "bitfield.h"
 #include "definitions.h"
 #include "dataconstants.h"
-#include "opentx_types.h"
+#include "edgetx_types.h"
 #include "myeeprom.h"
-#include "opentx_helpers.h"
+#include "edgetx_helpers.h"
 #include "pulses_common.h"
 #include <cstring>
 #include "fifo.h"
@@ -36,7 +36,6 @@
 
 #define AFHDS3_MIN_FREQ 50
 #define AFHDS3_MAX_FREQ 400
-#define AFHDS3_MAX_CHANNELS 18
 #define AFHDS3_FAILSAFE_MIN -15000
 #define AFHDS3_FAILSAFE_MAX 15000
 
@@ -71,11 +70,7 @@ typedef PulsesData ExtmoduleData;
 typedef SerialData IntmoduleData;
 #endif
 
-extern etx_module_driver_t externalDriver;
-
-#if defined(INTERNAL_MODULE_AFHDS3)
-extern etx_module_driver_t internalDriver;
-#endif
+extern etx_proto_driver_t ProtoDriver;
 
 void getStatusString(uint8_t module, char* buffer);
 void processTelemetryData(uint8_t data, uint8_t module);

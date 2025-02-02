@@ -20,8 +20,14 @@
  */
 
 #include "opentxsimulator.h"
-#include "opentx.h"
+#include "edgetx.h"
 #include "simulcd.h"
+#include "switches.h"
+#include "serial.h"
+#include "myeeprom.h"
+
+#include "hal/adc_driver.h"
+#include "hal/rotary_encoder.h"
 
 #include <QDebug>
 #include <QElapsedTimer>
@@ -34,8 +40,18 @@
 
 #define ETXS_DBG    qDebug() << "(" << simuTimerMicros() << "us)"
 
-int16_t g_anas[Analogs::NUM_ANALOGS];
+int16_t g_anas[MAX_ANALOG_INPUTS];
 QVector<QIODevice *> OpenTxSimulator::tracebackDevices;
+
+typedef struct {
+  uint8_t index;
+  QMutex mutex;
+  QQueue<uint8_t> receiveBuffer;
+  OpenTxSimulator * simulator;
+} simulated_serial_port_t;
+
+simulated_serial_port_t simulatedSerialPorts[MAX_AUX_SERIAL];
+extern etx_serial_port_t * serialPorts[MAX_AUX_SERIAL];
 
 #if defined(HARDWARE_TOUCH)
   tmr10ms_t downTime = 0;
@@ -44,14 +60,24 @@ QVector<QIODevice *> OpenTxSimulator::tracebackDevices;
   #define TAP_TIME 25
 #endif
 
-uint16_t anaIn(uint8_t chan)
+uint16_t simu_get_analog(uint8_t idx)
 {
-  return g_anas[chan];
-}
+  // TODO: return raw values for ADC_INPUT_VBAT and ADC_INPUT_RTC_BAT
 
-uint16_t getAnalogValue(uint8_t index)
-{
-  return anaIn(index);
+  // 6POS simu mechanism use a different scale, so needs specific offset
+  if (IS_POT_MULTIPOS(idx - adcGetInputOffset(ADC_INPUT_FLEX))) {
+    // Use radio calibration data to determine conversion factor
+    StepsCalibData * calib = (StepsCalibData *) &g_eeGeneral.calib[idx];
+    int range6POS = 2048; // Default if calibration is not valid
+    if (calib->count != 0) {
+      // calculate 6POS switch range from calibration data
+      int c1 = calib->steps[calib->count - 1] * 32; // last calibration value
+      int c2 = calib->steps[calib->count - 2] * 32; // 2nd last calibration value
+      range6POS = c1 + (c1 - c2) / 2;
+    }
+    return (g_anas[idx] * range6POS / 2048);
+  }
+  return (g_anas[idx] * 2) + 2048;
 }
 
 void firmwareTraceCb(const char * text)
@@ -62,6 +88,94 @@ void firmwareTraceCb(const char * text)
   }
 }
 
+// Serial port handling needs to know about OpenTxSimulator, so we we
+// need to update what's in simpgmspace.cpp when we have a simulator
+// to point at.
+
+static void* simulator_host_drv_init(void* hw_def, const etx_serial_init* dev)
+{
+  if (hw_def == nullptr)
+    return nullptr;
+
+  simulated_serial_port_t *port = (simulated_serial_port_t *)hw_def;
+
+  port->simulator->drv_auxSerialInit(port->index, dev);
+
+  // Return the port definition as the context
+  return (void *)port;
+}
+
+static void simulator_host_drv_deinit(void* ctx)
+{
+  if (ctx == nullptr)
+    return;
+
+  simulated_serial_port_t *port = (simulated_serial_port_t *)ctx;
+  port->simulator->drv_auxSerialDeinit(port->index);
+}
+
+static void simulator_host_drv_send_byte(void* ctx, uint8_t b)
+{
+  if (ctx == nullptr)
+    return;
+
+  simulated_serial_port_t *port = (simulated_serial_port_t *)ctx;
+
+  port->simulator->drv_auxSerialSendByte(port->index, b);
+}
+
+static void simulator_host_drv_send_buffer(void* ctx, const uint8_t* b, uint32_t l)
+{
+  if (ctx == nullptr)
+    return;
+
+  simulated_serial_port_t *port = (simulated_serial_port_t *)ctx;
+
+  port->simulator->drv_auxSerialSendBuffer(port->index, b, l);
+}
+
+static int simulator_host_drv_get_byte(void* ctx, uint8_t* b)
+{
+  if (ctx == nullptr)
+    return 0;
+
+  simulated_serial_port_t *port = (simulated_serial_port_t *)ctx;
+
+  return port->simulator->drv_auxSerialGetByte(port->index, b);
+}
+
+static void simulator_host_drv_set_baudrate(void* ctx, uint32_t baudrate)
+{
+  if (ctx == nullptr)
+    return;
+
+  simulated_serial_port_t *port = (simulated_serial_port_t *)ctx;
+  port->simulator->drv_auxSerialSetBaudrate(port->index, baudrate);
+}
+
+static const etx_serial_driver_t simulator_host_drv = {
+  .init = simulator_host_drv_init,
+  .deinit = simulator_host_drv_deinit,
+  .sendByte = simulator_host_drv_send_byte,
+  .sendBuffer = simulator_host_drv_send_buffer,
+  .txCompleted = nullptr,
+  .waitForTxCompleted = nullptr,
+  .enableRx = nullptr,
+  .getByte = simulator_host_drv_get_byte,
+  .getLastByte = nullptr,
+  .getBufferedBytes = nullptr,
+  .copyRxBuffer = nullptr,
+  .clearRxBuffer = nullptr,
+  .getBaudrate = nullptr,
+  .setBaudrate = simulator_host_drv_set_baudrate,
+  .setPolarity = nullptr,
+  .setHWOption = nullptr,
+  .setReceiveCb = nullptr,
+  .setIdleCb = nullptr,
+  .setBaudrateCb = nullptr,
+};
+
+
 OpenTxSimulator::OpenTxSimulator() :
   SimulatorInterface(),
   m_timer10ms(nullptr),
@@ -70,12 +184,30 @@ OpenTxSimulator::OpenTxSimulator() :
 {
   tracebackDevices.clear();
   traceCallback = firmwareTraceCb;
+
+  // When we create the simulator, we change the UART driver
+  for (int i = 0; i < MAX_AUX_SERIAL; i++) {
+    etx_serial_port_t * port = serialPorts[i];
+    if (port != nullptr) {
+      port->uart = &simulator_host_drv;
+      port->hw_def = &(simulatedSerialPorts[i]);
+      simulatedSerialPorts[i].index = i;
+      simulatedSerialPorts[i].simulator = this;
+    }
+  }
 }
 
 OpenTxSimulator::~OpenTxSimulator()
 {
   traceCallback = nullptr;
   tracebackDevices.clear();
+
+  for (int i = 0; i < MAX_AUX_SERIAL; i++) {
+    etx_serial_port_t * port = serialPorts[i];
+    if (port != nullptr) {
+      port->hw_def = nullptr;
+    }
+  }
 
   if (m_timer10ms)
     delete m_timer10ms;
@@ -123,11 +255,12 @@ void OpenTxSimulator::init()
   QMutexLocker lckr(&m_mtxSimuMain);
   memset(g_anas, 0, sizeof(g_anas));
 
-#if defined(PCBTARANIS)
-  g_anas[TX_RTC_VOLTAGE] = 800;  // 2,34V
-#endif
-
   simuInit();
+
+  if (adcGetMaxInputs(ADC_INPUT_RTC_BAT) > 0) {
+    auto idx = adcGetInputOffset(ADC_INPUT_RTC_BAT);
+    setAnalogValue(idx, 800);
+  }
 }
 
 void OpenTxSimulator::start(const char * filename, bool tests)
@@ -187,7 +320,8 @@ void OpenTxSimulator::readRadioData(QByteArray & dest)
 {
 #if defined(EEPROM_SIZE)
   QMutexLocker lckr(&m_mtxRadioData);
-  memcpy(dest.data(), eeprom, std::min<int>(EEPROM_SIZE, dest.size()));
+  if (eeprom)
+    memcpy(dest.data(), eeprom, qMin<int>(EEPROM_SIZE, dest.size()));
 #endif
 }
 
@@ -220,19 +354,16 @@ void OpenTxSimulator::setTrimSwitch(uint8_t trim, bool state)
 
 void OpenTxSimulator::setTrim(unsigned int idx, int value)
 {
-  unsigned i = idx;
-  if (i < 4)  // swap axes
-    i = modn12x3[4 * getStickMode() + idx];
+  unsigned i = inputMappingConvertMode(idx);
   uint8_t phase = getTrimFlightMode(getFlightMode(), i);
   setTrimValue(phase, i, value);
 }
 
 void OpenTxSimulator::setTrainerInput(unsigned int inputNumber, int16_t value)
 {
-  static unsigned dim = DIM(ppmInput);
-  //setTrainerTimeout(100);
+  static unsigned dim = DIM(trainerInput);
   if (inputNumber < dim)
-    ppmInput[inputNumber] = qMin(qMax((int16_t)-512, value), (int16_t)512);
+    trainerInput[inputNumber] = qMin(qMax((int16_t)-512, value), (int16_t)512);
 }
 
 void OpenTxSimulator::setInputValue(int type, uint8_t index, int16_t value)
@@ -241,16 +372,16 @@ void OpenTxSimulator::setInputValue(int type, uint8_t index, int16_t value)
   switch (type) {
     case INPUT_SRC_ANALOG :
     case INPUT_SRC_STICK :
+    case INPUT_SRC_KNOB :
+    case INPUT_SRC_SLIDER :
       setAnalogValue(index, value);
       break;
-    case INPUT_SRC_KNOB :
-      setAnalogValue(index + NUM_STICKS, value);
-      break;
-    case INPUT_SRC_SLIDER :
-      setAnalogValue(index + NUM_STICKS + NUM_POTS, value);
-      break;
     case INPUT_SRC_TXVIN :
-      setAnalogValue(Analogs::TX_VOLTAGE, voltageToAdc(value));
+      if (adcGetMaxInputs(ADC_INPUT_VBAT) > 0) {
+        auto idx = adcGetInputOffset(ADC_INPUT_VBAT);
+        setAnalogValue(idx, voltageToAdc(value));
+        emit txBatteryVoltageChanged((unsigned int)value);
+      }
       break;
     case INPUT_SRC_SWITCH :
       setSwitch(index, (int8_t)value);
@@ -273,12 +404,23 @@ void OpenTxSimulator::setInputValue(int type, uint8_t index, int16_t value)
   }
 }
 
+extern volatile rotenc_t rotencValue;
+extern volatile uint32_t rotencDt;
+
 void OpenTxSimulator::rotaryEncoderEvent(int steps)
 {
-#if defined(ROTARY_ENCODER_NAVIGATION)
-  (g_eeGeneral.rotEncMode >= ROTARY_ENCODER_MODE_INVERT_BOTH ? steps *= -1
-                                                             : steps);
-  ROTARY_ENCODER_NAVIGATION_VALUE += steps * ROTARY_ENCODER_GRANULARITY;
+#if defined(ROTARY_ENCODER_NAVIGATION) && !defined(USE_HATS_AS_KEYS)
+  static uint32_t last_tick = 0;
+  if (steps != 0) {
+    if (g_eeGeneral.rotEncMode == ROTARY_ENCODER_MODE_INVERT_BOTH)
+      steps *= -1;
+    rotencValue += steps * ROTARY_ENCODER_GRANULARITY;
+    // TODO: set rotencDt
+    uint32_t now = RTOS_GET_MS();
+    uint32_t dt = now - last_tick;
+    rotencDt += dt;
+    last_tick = now;
+  }
 #else
   // TODO : this should probably be handled in the GUI
   int key;
@@ -381,13 +523,61 @@ void OpenTxSimulator::lcdFlushed()
 
 void OpenTxSimulator::setTrainerTimeout(uint16_t ms)
 {
-  ppmInputValidityTimer = ms;
+  trainerSetTimer(ms);
 }
 
-void OpenTxSimulator::sendTelemetry(const QByteArray data)
+void OpenTxSimulator::sendTelemetry(const uint8_t module, const uint8_t protocol, const QByteArray data)
 {
   //ETXS_DBG << data;
-  sportProcessTelemetryPacket((uint8_t *)data.constData());
+  switch (protocol) {
+  case SIMU_TELEMETRY_PROTOCOL_FRSKY_SPORT:
+    sportProcessTelemetryPacket(module,
+                                (uint8_t *)data.constData(),
+                                data.count());
+    break;
+  case SIMU_TELEMETRY_PROTOCOL_FRSKY_HUB:
+    frskyDProcessPacket(module,
+                        (uint8_t *)data.constData(),
+                        data.count());
+    break;
+  case SIMU_TELEMETRY_PROTOCOL_FRSKY_HUB_OOB:
+    // FrSky D telemetry is a stream which can span multiple
+    // packets. The telemetry parser _could_ be in the middle of a
+    // user packet when we want to inject telemetry, so we can't just
+    // call frskyDProcessPacket() with a USRPKT (at least not safely!)
+    // Instead we will bypass the telemetry stream parser and inject
+    // out of band into processHubPacket(). This way we also don't
+    // have to mess with byte stuffing and variable length packets.
+    //
+    // Note this doesn't take into account which module it's from, but
+    // that's how it works in the radio too if you have two frsky D
+    // modules running at once, so ¯\_(ツ)_/¯
+    {
+      uint8_t id = data[0];
+      uint16_t value = ((uint8_t)(data[2]) << 8) + (uint8_t)(data[1]);
+
+      processHubPacket(id, value);
+    }
+    break;
+  case SIMU_TELEMETRY_PROTOCOL_CROSSFIRE:
+    processCrossfireTelemetryFrame(module,
+                                   (uint8_t *)data.constData(),
+                                   data.count());
+    break;
+  default:
+    // Do nothing
+    break;
+  }
+}
+
+void OpenTxSimulator::sendInternalModuleTelemetry(const uint8_t protocol, const QByteArray data)
+{
+  sendTelemetry(INTERNAL_MODULE, protocol, data);
+}
+
+void OpenTxSimulator::sendExternalModuleTelemetry(const uint8_t protocol, const QByteArray data)
+{
+  sendTelemetry(EXTERNAL_MODULE, protocol, data);
 }
 
 uint8_t OpenTxSimulator::getSensorInstance(uint16_t id, uint8_t defaultValue)
@@ -396,7 +586,7 @@ uint8_t OpenTxSimulator::getSensorInstance(uint16_t id, uint8_t defaultValue)
     if (isTelemetryFieldAvailable(i)) {
       TelemetrySensor * sensor = &g_model.telemetrySensors[i];
       if (sensor->id == id) {
-        return sensor->frskyInstance.physID + 1;
+        return sensor->frskyInstance.physID;
       }
     }
   }
@@ -438,6 +628,14 @@ const int OpenTxSimulator::getCapability(Capability cap)
     case CAP_TELEM_FRSKY_SPORT :
         ret = 1;
       break;
+
+    case CAP_SERIAL_AUX1:
+      ret = (auxSerialGetPort(SP_AUX1) != nullptr);
+      break;
+
+    case CAP_SERIAL_AUX2:
+      ret = (auxSerialGetPort(SP_AUX2) != nullptr);
+      break;
   }
   return ret;
 }
@@ -470,6 +668,74 @@ void OpenTxSimulator::removeTracebackDevice(QIODevice * device)
   }
 }
 
+void OpenTxSimulator::receiveAuxSerialData(quint8 port_nr, const QByteArray & data)
+{
+  if (port_nr >= MAX_AUX_SERIAL)
+    return;
+
+  QMutexLocker locker(&(simulatedSerialPorts[port_nr].mutex));
+
+  for (uint8_t byte : data)
+    simulatedSerialPorts[port_nr].receiveBuffer.enqueue(byte);
+}
+
+void OpenTxSimulator::drv_auxSerialSetBaudrate(quint8 port_nr, quint32 baudrate)
+{
+  emit auxSerialSetBaudrate(port_nr, baudrate);
+}
+
+void OpenTxSimulator::drv_auxSerialInit(quint8 port_nr, const etx_serial_init* dev)
+{
+  switch(dev->encoding) {
+  case ETX_Encoding_8N1:
+    emit auxSerialSetEncoding(port_nr, SERIAL_ENCODING_8N1);
+    break;
+  case ETX_Encoding_8E2:
+    emit auxSerialSetEncoding(port_nr, SERIAL_ENCODING_8E2);
+    break;
+  default:
+    // Do nothing, host hardware can't do SERIAL_ENCODING_PXX1_PWM
+    break;
+  }
+
+  if (dev->baudrate != 0)
+    emit auxSerialSetBaudrate(port_nr, dev->baudrate);
+
+  emit auxSerialStart(port_nr);
+}
+
+void OpenTxSimulator::drv_auxSerialDeinit(quint8 port_nr)
+{
+  emit auxSerialStop(port_nr);
+}
+
+void OpenTxSimulator::drv_auxSerialSendByte(quint8 port_nr, uint8_t b)
+{
+  QByteArray data = QByteArray((const char *)&b, 1);
+
+  emit auxSerialSendData(port_nr, data);
+}
+
+void OpenTxSimulator::drv_auxSerialSendBuffer(quint8 port_nr, const uint8_t* b, uint32_t l)
+{
+  QByteArray data = QByteArray((const char *)b, l);
+
+  emit auxSerialSendData(port_nr, data);
+}
+
+int OpenTxSimulator::drv_auxSerialGetByte(quint8 port_nr, uint8_t *b)
+{
+  // Obtain the port's mutex before messing with the buffer
+  QMutexLocker locker(&(simulatedSerialPorts[port_nr].mutex));
+
+  if (simulatedSerialPorts[port_nr].receiveBuffer.isEmpty())
+    return 0;
+
+  uint8_t byte = simulatedSerialPorts[port_nr].receiveBuffer.dequeue();
+
+  *b = byte;
+  return 1;
+}
 
 /*** Protected functions ***/
 
@@ -535,8 +801,7 @@ void OpenTxSimulator::checkOutputsChanged()
   const static int16_t limit = 512 * 2;
   qint32 tmpVal;
   uint8_t i, idx;
-  const uint8_t phase = getFlightMode();  // opentx.cpp
-  const uint8_t mode = getStickMode();
+  const uint8_t phase = getFlightMode();  // edgetx.cpp
 
   for (i=0; i < chansDim; i++) {
     if (lastOutputs.chans[i] != channelOutputs[i] || m_resetOutputsData) {
@@ -552,7 +817,7 @@ void OpenTxSimulator::checkOutputsChanged()
   }
 
   for (i=0; i < MAX_LOGICAL_SWITCHES; i++) {
-    tmpVal = (qint32)GET_SWITCH_BOOL(SWSRC_SW1+i);
+    tmpVal = (qint32)GET_SWITCH_BOOL(SWSRC_FIRST_LOGICAL_SWITCH+i);
     if (lastOutputs.vsw[i] != (bool)tmpVal || m_resetOutputsData) {
       emit virtualSwValueChange(i, tmpVal);
       emit outputValueChange(OUTPUT_SRC_VIRTUAL_SW, i, tmpVal);
@@ -561,11 +826,7 @@ void OpenTxSimulator::checkOutputsChanged()
   }
 
   for (i=0; i < Board::TRIM_AXIS_COUNT; i++) {
-    if (i < 4)  // swap axes
-      idx = modn12x3[4 * mode + i];
-    else
-      idx = i;
-
+    idx = inputMappingConvertMode(i);
     tmpVal = getTrimValue(getTrimFlightMode(phase, idx), idx);
     if (lastOutputs.trims[i] != tmpVal || m_resetOutputsData) {
       emit trimValueChange(i, tmpVal);
@@ -615,8 +876,8 @@ uint8_t OpenTxSimulator::getStickMode()
 
 const char * OpenTxSimulator::getPhaseName(unsigned int phase)
 {
-  static char buff[sizeof(g_model.flightModeData[0].name)+1];
-  zchar2str(buff, g_model.flightModeData[phase].name, sizeof(g_model.flightModeData[0].name));
+  static char buff[LEN_FLIGHT_MODE_NAME+1];
+  strAppend(buff, g_model.flightModeData[phase].name, LEN_FLIGHT_MODE_NAME);
   return buff;
 }
 
@@ -634,17 +895,26 @@ const char * OpenTxSimulator::getError()
   return main_thread_error;
 }
 
-const int OpenTxSimulator::voltageToAdc(const int volts)
+const int OpenTxSimulator::voltageToAdc(const int voltage)
 {
-  int ret = 0;
-#if defined(PCBHORUS) || defined(PCBX7)
-  ret = (float)volts * 16.2f;
-#elif defined(PCBTARANIS)
-  ret = (float)volts * 13.3f;
+  int volts = voltage * 10;  // prec2
+  int adc = 0;
+
+#if defined(VBAT_MOSFET_DROP)
+  // TRACE("volts: %d r1: %d r2: %d drop: %d vref: %d calib: %d", volts, VBAT_DIV_R1, VBAT_DIV_R2, VBAT_MOSFET_DROP, ADC_VREF_PREC2, g_eeGeneral.txVoltageCalibration);
+  adc = (volts - VBAT_MOSFET_DROP) * (2 * RESX * 1000) / ADC_VREF_PREC2 / (((1000 + g_eeGeneral.txVoltageCalibration) * (VBAT_DIV_R2 + VBAT_DIV_R1)) / VBAT_DIV_R1);
+#elif defined(BATT_SCALE)
+  // TRACE("volts: %d div: %d drop: %d scale: %d calib: %d", volts, BATTERY_DIVIDER, VOLTAGE_DROP, BATT_SCALE, g_eeGeneral.txVoltageCalibration);
+  adc = (volts - VOLTAGE_DROP) * BATTERY_DIVIDER / (128 + g_eeGeneral.txVoltageCalibration) / BATT_SCALE;
+#elif defined(VOLTAGE_DROP)
+  // TRACE("volts: %d div: %d drop: %d", volts, BATTERY_DIVIDER, VOLTAGE_DROP);
+  adc = (volts - VOLTAGE_DROP) * BATTERY_DIVIDER / (1000 + g_eeGeneral.txVoltageCalibration);
 #else
-  ret = (float)volts * 14.15f;
+  // TRACE("volts: %d div: %d calib: %d", volts, BATTERY_DIVIDER, g_eeGeneral.txVoltageCalibration);
+  adc = volts * BATTERY_DIVIDER / (1000 + g_eeGeneral.txVoltageCalibration);
 #endif
-  return ret;
+  // TRACE("calc adc: %d", adc);
+  return adc * 2; // div by 2 in firmware filtered adc calcs
 }
 
 
@@ -685,6 +955,8 @@ class OpenTxSimulatorFactory: public SimulatorFactory
       return Board::BOARD_TARANIS_X9LITE;
 #elif defined(PCBNV14)
       return Board::BOARD_FLYSKY_NV14;
+#elif defined(PCBPL18)
+      return Board::BOARD_FLYSKY_PL18;
 #else
       return Board::BOARD_TARANIS_X9D;
 #endif

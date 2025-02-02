@@ -20,17 +20,28 @@
  */
 
 #include "updatethemes.h"
-#include "eeprominterface.h"
 
 UpdateThemes::UpdateThemes(QWidget * parent) :
-  UpdateInterface(parent)
+  UpdateInterface(parent, CID_Themes, tr("Themes"), Repo::REPO_TYPE_GITHUB,
+                  QString(GH_API_REPOS_EDGETX).append("/themes"))
 {
-  setName("Themes");
-  setRepo(QString(GH_REPOS_EDGETX).append("/themes"));
+  init(); // call after UpdateInterface ctor due to virtual functions
+}
 
-  UpdateParameters::AssetParams &ap = dfltParams->addAsset();
-  ap.filterType = UpdateParameters::UFT_Startswith;
-  ap.filter = "edgetx-themes";
-  ap.maxExpected = 1;
-  ap.flags = dfltParams->data.flags | UPDFLG_CopyStructure;
+void UpdateThemes::assetSettingsInit()
+{
+  if (!isSettingsIndexValid())
+    return;
+
+  g.component[id()].initAllAssets();
+
+  ComponentAssetData &cad = g.component[id()].asset[0];
+  cad.desc("files");
+  cad.processes(UPDFLG_Common_Asset);
+  cad.flags(cad.processes() | UPDFLG_CopyStructure);
+  cad.filterType(UpdateParameters::UFT_Startswith);
+  cad.filter("edgetx-themes");
+  cad.maxExpected(1);
+
+  qDebug() << "Asset settings initialised";
 }

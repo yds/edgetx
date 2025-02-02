@@ -19,27 +19,10 @@
  * GNU General Public License for more details.
  */
 
-//
-// Obsoleted definitions:
-//  -> please check against libopenui_defines.h for conflicts
-//  -> here we use the 4 most significant bits for our flags (32 bit unsigned)
-//
-// INVERS & BLINK are used in most scripts, let's offer a compatibility mode.
-//
-#undef INVERS
-#undef BLINK
+#pragma once
 
-#define INVERS     0x01u
-#define BLINK    0x1000u
-#define RGB_FLAG 0x8000u
+#include "definitions.h"
+#include "lua_states.h"
 
-constexpr coord_t INVERT_BOX_MARGIN = 2;
-
-constexpr int8_t text_horizontal_offset[7] {-2,-1,-2,-2,-2,-2,-2};
-constexpr int8_t text_vertical_offset[7] {2,2,0,2,3,3,7};
-
-extern bool           luaLcdAllowed;
-extern BitmapBuffer * luaLcdBuffer;
-extern Widget *       runningFS;
-
-LcdFlags flagsRGB(LcdFlags flags);
+EXTERN_C(LUALIB_API int luaopen_bitmap(lua_State * L));
+EXTERN_C(LUALIB_API int luaopen_lvgl(lua_State * L));
